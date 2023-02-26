@@ -242,6 +242,7 @@ func (s *SecureServingOptions) ApplyTo(config **server.SecureServingInfo) error 
 		}
 
 		s.Listener, s.BindPort, err = CreateListener(s.BindNetwork, addr, c)
+		s.Listener.Close()
 		if err != nil {
 			return fmt.Errorf("failed to create listener: %v", err)
 		}

@@ -27,15 +27,15 @@ export KUBE_INTEGRATION_ETCD_URL="http://${ETCD_HOST}:${ETCD_PORT}"
 
 kube::etcd::validate() {
   # validate if in path
-  command -v etcd >/dev/null || {
-    kube::log::usage "etcd must be in your PATH"
-    kube::log::info "You can use 'hack/install-etcd.sh' to install a copy in third_party/."
-    exit 1
-  }
+  # command -v etcd >/dev/null || {
+  #   kube::log::usage "etcd must be in your PATH"
+  #   kube::log::info "You can use 'hack/install-etcd.sh' to install a copy in third_party/."
+  #   exit 1
+  # }
 
   # validate etcd port is free
   local port_check_command
-  if command -v ss &> /dev/null && ss -Version | grep 'iproute2' &> /dev/null; then
+  if command -v ss &>/dev/null && ss -Version | grep 'iproute2' &>/dev/null; then
     port_check_command="ss"
   elif command -v netstat &>/dev/null; then
     port_check_command="netstat"
@@ -52,22 +52,22 @@ kube::etcd::validate() {
   # need set the env of "ETCD_UNSUPPORTED_ARCH" on unstable arch.
   arch=$(uname -m)
   if [[ $arch =~ aarch* ]]; then
-	  export ETCD_UNSUPPORTED_ARCH=arm64
+    export ETCD_UNSUPPORTED_ARCH=arm64
   elif [[ $arch =~ arm* ]]; then
-	  export ETCD_UNSUPPORTED_ARCH=arm
+    export ETCD_UNSUPPORTED_ARCH=arm
   fi
   # validate installed version is at least equal to minimum
   version=$(etcd --version | grep Version | head -n 1 | cut -d " " -f 3)
   if [[ $(kube::etcd::version "${ETCD_VERSION}") -gt $(kube::etcd::version "${version}") ]]; then
-   export PATH=${KUBE_ROOT}/third_party/etcd:${PATH}
-   hash etcd
-   echo "${PATH}"
-   version=$(etcd --version | grep Version | head -n 1 | cut -d " " -f 3)
-   if [[ $(kube::etcd::version "${ETCD_VERSION}") -gt $(kube::etcd::version "${version}") ]]; then
-    kube::log::usage "etcd version ${ETCD_VERSION} or greater required."
-    kube::log::info "You can use 'hack/install-etcd.sh' to install a copy in third_party/."
-    exit 1
-   fi
+    export PATH=${KUBE_ROOT}/third_party/etcd:${PATH}
+    hash etcd
+    echo "${PATH}"
+    version=$(etcd --version | grep Version | head -n 1 | cut -d " " -f 3)
+    if [[ $(kube::etcd::version "${ETCD_VERSION}") -gt $(kube::etcd::version "${version}") ]]; then
+      kube::log::usage "etcd version ${ETCD_VERSION} or greater required."
+      kube::log::info "You can use 'hack/install-etcd.sh' to install a copy in third_party/."
+      exit 1
+    fi
   fi
 }
 
@@ -87,7 +87,7 @@ kube::etcd::start() {
     ETCD_LOGFILE=${ETCD_LOGFILE:-"/dev/null"}
   fi
   kube::log::info "etcd --advertise-client-urls ${KUBE_INTEGRATION_ETCD_URL} --data-dir ${ETCD_DIR} --listen-client-urls http://${ETCD_HOST}:${ETCD_PORT} --log-level=${ETCD_LOGLEVEL} 2> \"${ETCD_LOGFILE}\" >/dev/null"
-  etcd --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --data-dir "${ETCD_DIR}" --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --log-level="${ETCD_LOGLEVEL}" 2> "${ETCD_LOGFILE}" >/dev/null &
+  etcd --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --data-dir "${ETCD_DIR}" --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --log-level="${ETCD_LOGLEVEL}" 2>"${ETCD_LOGFILE}" >/dev/null &
   ETCD_PID=$!
 
   echo "Waiting for etcd to come up."
@@ -112,20 +112,19 @@ kube::etcd::start_scraping() {
 }
 
 kube::etcd::scrape() {
-    curl -s -S "${KUBE_INTEGRATION_ETCD_URL}/metrics" > "${ETCD_SCRAPE_DIR}/next" && mv "${ETCD_SCRAPE_DIR}/next" "${ETCD_SCRAPE_DIR}/$(date +%s).scrape"
+  curl -s -S "${KUBE_INTEGRATION_ETCD_URL}/metrics" >"${ETCD_SCRAPE_DIR}/next" && mv "${ETCD_SCRAPE_DIR}/next" "${ETCD_SCRAPE_DIR}/$(date +%s).scrape"
 }
 
-
 kube::etcd::stop() {
-  if [[ -n "${ETCD_SCRAPE_PID:-}" ]] && [[ -n "${ETCD_SCRAPE_DIR:-}" ]] ; then
+  if [[ -n "${ETCD_SCRAPE_PID:-}" ]] && [[ -n "${ETCD_SCRAPE_DIR:-}" ]]; then
     kill "${ETCD_SCRAPE_PID}" &>/dev/null || :
     wait "${ETCD_SCRAPE_PID}" &>/dev/null || :
     kube::etcd::scrape || :
     (
       # shellcheck disable=SC2015
-      cd "${ETCD_SCRAPE_DIR}"/.. && \
-      tar czf etcd-scrapes.tgz etcd-scrapes && \
-      rm -rf etcd-scrapes || :
+      cd "${ETCD_SCRAPE_DIR}"/.. &&
+        tar czf etcd-scrapes.tgz etcd-scrapes &&
+        rm -rf etcd-scrapes || :
     )
   fi
   if [[ -n "${ETCD_PID-}" ]]; then
@@ -157,7 +156,7 @@ kube::etcd::install() {
     if [[ $(readlink etcd) == etcd-v${ETCD_VERSION}-${os}-* ]]; then
       kube::log::info "etcd v${ETCD_VERSION} already installed. To use:"
       kube::log::info "export PATH=\"$(pwd)/etcd:\${PATH}\""
-      return  #already installed
+      return #already installed
     fi
 
     if [[ ${os} == "darwin" ]]; then

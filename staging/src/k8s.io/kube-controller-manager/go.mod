@@ -29,6 +29,11 @@ require (
 )
 
 replace (
+	github.com/onsi/ginkgo/v2 => github.com/onsi/ginkgo/v2 v2.1.6
+	golang.org/x/crypto => golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
+	golang.org/x/mod => golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4
+	golang.org/x/sync => golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
+	golang.org/x/tools => golang.org/x/tools v0.1.12
 	k8s.io/api => ../api
 	k8s.io/apimachinery => ../apimachinery
 	k8s.io/apiserver => ../apiserver

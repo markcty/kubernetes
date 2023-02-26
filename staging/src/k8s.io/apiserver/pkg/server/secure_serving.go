@@ -21,17 +21,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"golang.org/x/net/http2"
 	"k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 
+	"github.com/quic-go/quic-go/http3"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/endpoints/metrics"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
@@ -153,6 +151,7 @@ func (s *SecureServingInfo) tlsConfig(stopCh <-chan struct{}) (*tls.Config, erro
 // It returns a stoppedCh that is closed when all non-hijacked active requests have been processed.
 // It returns a listenerStoppedCh that is closed when the underlying http Server has stopped listening.
 func (s *SecureServingInfo) Serve(handler http.Handler, shutdownTimeout time.Duration, stopCh <-chan struct{}) (<-chan struct{}, <-chan struct{}, error) {
+	klog.Error("Modification to secure_serving is verified")
 	if s.Listener == nil {
 		return nil, nil, fmt.Errorf("listener must not be nil")
 	}
@@ -162,53 +161,53 @@ func (s *SecureServingInfo) Serve(handler http.Handler, shutdownTimeout time.Dur
 		return nil, nil, err
 	}
 
-	secureServer := &http.Server{
+	secureServer := &http3.Server{
 		Addr:           s.Listener.Addr().String(),
 		Handler:        handler,
 		MaxHeaderBytes: 1 << 20,
 		TLSConfig:      tlsConfig,
 
-		IdleTimeout:       90 * time.Second, // matches http.DefaultTransport keep-alive timeout
-		ReadHeaderTimeout: 32 * time.Second, // just shy of requestTimeoutUpperBound
+		// IdleTimeout:       90 * time.Second, // matches http.DefaultTransport keep-alive timeout
+		// ReadHeaderTimeout: 32 * time.Second, // just shy of requestTimeoutUpperBound
 	}
 
 	// At least 99% of serialized resources in surveyed clusters were smaller than 256kb.
 	// This should be big enough to accommodate most API POST requests in a single frame,
 	// and small enough to allow a per connection buffer of this size multiplied by `MaxConcurrentStreams`.
-	const resourceBody99Percentile = 256 * 1024
+	// const resourceBody99Percentile = 256 * 1024
 
-	http2Options := &http2.Server{
-		IdleTimeout: 90 * time.Second, // matches http.DefaultTransport keep-alive timeout
-	}
+	// http2Options := &http2.Server{
+	// 	IdleTimeout: 90 * time.Second, // matches http.DefaultTransport keep-alive timeout
+	// }
 
-	// shrink the per-stream buffer and max framesize from the 1MB default while still accommodating most API POST requests in a single frame
-	http2Options.MaxUploadBufferPerStream = resourceBody99Percentile
-	http2Options.MaxReadFrameSize = resourceBody99Percentile
+	// // shrink the per-stream buffer and max framesize from the 1MB default while still accommodating most API POST requests in a single frame
+	// http2Options.MaxUploadBufferPerStream = resourceBody99Percentile
+	// http2Options.MaxReadFrameSize = resourceBody99Percentile
 
-	// use the overridden concurrent streams setting or make the default of 250 explicit so we can size MaxUploadBufferPerConnection appropriately
-	if s.HTTP2MaxStreamsPerConnection > 0 {
-		http2Options.MaxConcurrentStreams = uint32(s.HTTP2MaxStreamsPerConnection)
-	} else {
-		http2Options.MaxConcurrentStreams = 250
-	}
+	// // use the overridden concurrent streams setting or make the default of 250 explicit so we can size MaxUploadBufferPerConnection appropriately
+	// if s.HTTP2MaxStreamsPerConnection > 0 {
+	// 	http2Options.MaxConcurrentStreams = uint32(s.HTTP2MaxStreamsPerConnection)
+	// } else {
+	// 	http2Options.MaxConcurrentStreams = 250
+	// }
 
-	// increase the connection buffer size from the 1MB default to handle the specified number of concurrent streams
-	http2Options.MaxUploadBufferPerConnection = http2Options.MaxUploadBufferPerStream * int32(http2Options.MaxConcurrentStreams)
+	// // increase the connection buffer size from the 1MB default to handle the specified number of concurrent streams
+	// http2Options.MaxUploadBufferPerConnection = http2Options.MaxUploadBufferPerStream * int32(http2Options.MaxConcurrentStreams)
 
-	if !s.DisableHTTP2 {
-		// apply settings to the server
-		if err := http2.ConfigureServer(secureServer, http2Options); err != nil {
-			return nil, nil, fmt.Errorf("error configuring http2: %v", err)
-		}
-	}
+	// if !s.DisableHTTP2 {
+	// 	// apply settings to the server
+	// 	if err := http2.ConfigureServer(secureServer, http2Options); err != nil {
+	// 		return nil, nil, fmt.Errorf("error configuring http2: %v", err)
+	// 	}
+	// }
 
-	// use tlsHandshakeErrorWriter to handle messages of tls handshake error
-	tlsErrorWriter := &tlsHandshakeErrorWriter{os.Stderr}
-	tlsErrorLogger := log.New(tlsErrorWriter, "", 0)
-	secureServer.ErrorLog = tlsErrorLogger
+	// // use tlsHandshakeErrorWriter to handle messages of tls handshake error
+	// tlsErrorWriter := &tlsHandshakeErrorWriter{os.Stderr}
+	// tlsErrorLogger := log.New(tlsErrorWriter, "", 0)
+	// secureServer.ErrorLog = tlsErrorLogger
 
 	klog.Infof("Serving securely on %s", secureServer.Addr)
-	return RunServer(secureServer, s.Listener, shutdownTimeout, stopCh)
+	return RunServer(secureServer, shutdownTimeout, stopCh)
 }
 
 // RunServer spawns a go-routine continuously serving until the stopCh is
@@ -218,38 +217,37 @@ func (s *SecureServingInfo) Serve(handler http.Handler, shutdownTimeout time.Dur
 // This function does not block
 // TODO: make private when insecure serving is gone from the kube-apiserver
 func RunServer(
-	server *http.Server,
-	ln net.Listener,
+	server *http3.Server,
 	shutDownTimeout time.Duration,
 	stopCh <-chan struct{},
 ) (<-chan struct{}, <-chan struct{}, error) {
-	if ln == nil {
-		return nil, nil, fmt.Errorf("listener must not be nil")
-	}
+	// if ln == nil {
+	// 	return nil, nil, fmt.Errorf("listener must not be nil")
+	// }
 
 	// Shutdown server gracefully.
 	serverShutdownCh, listenerStoppedCh := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(serverShutdownCh)
 		<-stopCh
-		ctx, cancel := context.WithTimeout(context.Background(), shutDownTimeout)
-		server.Shutdown(ctx)
-		cancel()
+		// ctx, cancel := context.WithTimeout(context.Background(), shutDownTimeout)
+		server.CloseGracefully(shutDownTimeout)
+		// cancel()
 	}()
 
 	go func() {
 		defer utilruntime.HandleCrash()
 		defer close(listenerStoppedCh)
 
-		var listener net.Listener
-		listener = tcpKeepAliveListener{ln}
-		if server.TLSConfig != nil {
-			listener = tls.NewListener(listener, server.TLSConfig)
-		}
+		// var listener net.Listener
+		// listener = tcpKeepAliveListener{ln}
+		// if server.TLSConfig != nil {
+		// 	listener = tls.NewListener(listener, server.TLSConfig)
+		// }
 
-		err := server.Serve(listener)
+		err := server.ListenAndServe()
 
-		msg := fmt.Sprintf("Stopped listening on %s", ln.Addr().String())
+		msg := fmt.Sprintf("Stopped listening on %s", server.Addr)
 		select {
 		case <-stopCh:
 			klog.Info(msg)

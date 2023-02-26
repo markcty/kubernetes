@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/quic-go/quic-go/http3"
 	"k8s.io/klog/v2"
 
 	"k8s.io/apiserver/pkg/authentication/authenticator"
@@ -41,13 +42,13 @@ type DeprecatedInsecureServingInfo struct {
 // Serve starts an insecure http server with the given handler. It fails only if
 // the initial listen call fails. It does not block.
 func (s *DeprecatedInsecureServingInfo) Serve(handler http.Handler, shutdownTimeout time.Duration, stopCh <-chan struct{}) error {
-	insecureServer := &http.Server{
+	insecureServer := &http3.Server{
 		Addr:           s.Listener.Addr().String(),
 		Handler:        handler,
 		MaxHeaderBytes: 1 << 20,
 
-		IdleTimeout:       90 * time.Second, // matches http.DefaultTransport keep-alive timeout
-		ReadHeaderTimeout: 32 * time.Second, // just shy of requestTimeoutUpperBound
+		// IdleTimeout:       90 * time.Second, // matches http.DefaultTransport keep-alive timeout
+		// ReadHeaderTimeout: 32 * time.Second, // just shy of requestTimeoutUpperBound
 	}
 
 	if len(s.Name) > 0 {
@@ -55,7 +56,7 @@ func (s *DeprecatedInsecureServingInfo) Serve(handler http.Handler, shutdownTime
 	} else {
 		klog.Infof("Serving insecurely on %s", s.Listener.Addr())
 	}
-	_, _, err := RunServer(insecureServer, s.Listener, shutdownTimeout, stopCh)
+	_, _, err := RunServer(insecureServer, shutdownTimeout, stopCh)
 	// NOTE: we do not handle stoppedCh returned by RunServer for graceful termination here
 	return err
 }
