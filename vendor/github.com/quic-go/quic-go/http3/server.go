@@ -750,3 +750,63 @@ func ListenAndServe(addr, certFile, keyFile string, handler http.Handler) error 
 		return err
 	}
 }
+
+// ListenAndServeCfg listens on the given network address for both, TLS and QUIC
+// connections in parallel. It returns if one of the two returns an error.
+// http.DefaultServeMux is used when handler is nil.
+// The correct Alt-Svc headers for QUIC are set.
+func ListenAndServeCfg(addr string, config *tls.Config, handler http.Handler) error {
+	// Open the listeners
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+	defer udpConn.Close()
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return err
+	}
+	tcpConn, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		return err
+	}
+	defer tcpConn.Close()
+	tlsConn := tls.NewListener(tcpConn, config)
+	defer tlsConn.Close()
+	// Start the servers
+	httpServer := &http.Server{
+		Addr:      addr,
+		TLSConfig: config,
+	}
+	quicServer := &Server{
+		TLSConfig: config,
+		Handler:   handler,
+	}
+	if handler == nil {
+		handler = http.DefaultServeMux
+	}
+	httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		quicServer.SetQuicHeaders(w.Header())
+		handler.ServeHTTP(w, r)
+	})
+	hErr := make(chan error)
+	qErr := make(chan error)
+	go func() {
+		hErr <- httpServer.Serve(tlsConn)
+	}()
+	go func() {
+		qErr <- quicServer.Serve(udpConn)
+	}()
+	select {
+	case err := <-hErr:
+		quicServer.Close()
+		return err
+	case err := <-qErr:
+		// Cannot close the HTTP server or wait for requests to complete properly :/
+		return err
+	}
+}

@@ -630,7 +630,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 	// get port
 	serverPort := 8888
-	stoppedCh, _, err := RunServer(insecureServer, 10*time.Second, stopCh)
+	stoppedCh, _, err := RunServer(10*time.Second, stopCh)
 	if err != nil {
 		t.Fatalf("RunServer err: %v", err)
 	}
