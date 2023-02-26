@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	goruntime "runtime"
@@ -30,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
 	"github.com/stretchr/testify/assert"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -617,20 +617,20 @@ func TestGracefulShutdown(t *testing.T) {
 	s.Handler.NonGoRestfulMux.Handle("/test", twoSecondHandler)
 	s.Handler.NonGoRestfulMux.Handle("/200", okHandler)
 
-	insecureServer := &http3.Server{
+	insecureServer := &http.Server{
 		Addr:    "0.0.0.0:0",
 		Handler: s.Handler,
 	}
 	stopCh := make(chan struct{})
 
-	// ln, err := net.Listen("tcp", insecureServer.Addr)
-	// if err != nil {
-	// 	t.Errorf("failed to listen on %v: %v", insecureServer.Addr, err)
-	// }
+	ln, err := net.Listen("tcp", insecureServer.Addr)
+	if err != nil {
+		t.Errorf("failed to listen on %v: %v", insecureServer.Addr, err)
+	}
 
 	// get port
 	serverPort := 8888
-	stoppedCh, _, err := RunServer(insecureServer, 10*time.Second, stopCh)
+	stoppedCh, _, err := RunServer(10*time.Second, stopCh)
 	if err != nil {
 		t.Fatalf("RunServer err: %v", err)
 	}

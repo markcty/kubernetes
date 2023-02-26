@@ -686,7 +686,7 @@ function wait_node_ready(){
   # check the nodes information after kubelet daemon start
   local nodes_stats="${KUBECTL} --kubeconfig '${CERT_DIR}/admin.kubeconfig' get nodes"
   local node_name=$HOSTNAME_OVERRIDE
-  local system_node_wait_time=60
+  local system_node_wait_time=3600
   local interval_time=2
   kube::util::wait_for_success "$system_node_wait_time" "$interval_time" "$nodes_stats | grep $node_name"
   if [ $? == "1" ]; then
