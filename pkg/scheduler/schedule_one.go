@@ -66,6 +66,9 @@ var clearNominatedNode = &framework.NominatingInfo{NominatingMode: framework.Mod
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	podInfo := sched.NextPod()
+	if podInfo.Pod != nil {
+		klog.Errorf("Schedule pod %s at %d", podInfo.Pod.Name, time.Now().UnixMicro())
+	}
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
 		return

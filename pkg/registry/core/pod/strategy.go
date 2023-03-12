@@ -79,13 +79,13 @@ func (podStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
 
 // PrepareForCreate clears fields that are not allowed to be set by end users on creation.
 func (podStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
-	klog.Errorf("Prepare for pod creation at %d", time.Now().UnixMicro())
 	pod := obj.(*api.Pod)
 	pod.Status = api.PodStatus{
 		Phase:    api.PodPending,
 		QOSClass: qos.GetPodQOS(pod),
 	}
 
+	klog.Errorf("Prepare for pod %s's creation at %d", pod.Name, time.Now().UnixMicro())
 	podutil.DropDisabledPodFields(pod, nil)
 
 	applySeccompVersionSkew(pod)

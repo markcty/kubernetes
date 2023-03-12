@@ -175,7 +175,6 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 		}
 
 		trace.Step("About to store object in database")
-		klog.Errorf("Start to create a new object in etcd at ", time.Now().UnixMicro())
 		admissionAttributes := admission.NewAttributesRecord(obj, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Create, options, dryrun.IsDryRun(options.DryRun), userInfo)
 		requestFunc := func() (runtime.Object, error) {
 			return r.Create(
@@ -216,7 +215,6 @@ func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Int
 			return result, err
 		})
 		trace.Step("Write to database call finished", utiltrace.Field{"len", len(body)}, utiltrace.Field{"err", err})
-		klog.Errorf("Finish creating a new object in etcd at %d", time.Now().UnixMicro())
 		if err != nil {
 			scope.err(err, w, req)
 			return
