@@ -18,10 +18,12 @@ package registry
 
 import (
 	"context"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/klog/v2"
 )
 
 type DryRunnableStorage struct {
@@ -34,6 +36,7 @@ func (s *DryRunnableStorage) Versioner() storage.Versioner {
 }
 
 func (s *DryRunnableStorage) Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64, dryRun bool) error {
+	klog.Errorf("Create a new pod object(dry run) at ", time.Now().UnixMicro())
 	if dryRun {
 		if err := s.Storage.Get(ctx, key, storage.GetOptions{}, out); err == nil {
 			return storage.NewKeyExistsError(key, 0)
