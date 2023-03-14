@@ -171,6 +171,7 @@ func calcRestartCountByLogDir(path string) (int, error) {
 // * start the container
 // * run the post start lifecycle hooks (if applicable)
 func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandboxConfig *runtimeapi.PodSandboxConfig, spec *startSpec, pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, podIP string, podIPs []string) (string, error) {
+	klog.Errorf("Start the real container, %s", pod.Name)
 	container := spec.container
 
 	// Step 1: pull the image.

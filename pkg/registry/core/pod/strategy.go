@@ -85,7 +85,7 @@ func (podStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 		QOSClass: qos.GetPodQOS(pod),
 	}
 
-	klog.Errorf("Prepare for pod %s's creation at %d", pod.Name, time.Now().UnixMicro())
+	klog.Errorf("Prepare for pod %s's creation", pod.Name)
 	podutil.DropDisabledPodFields(pod, nil)
 
 	applySeccompVersionSkew(pod)
