@@ -666,6 +666,7 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 //  6. Create init containers.
 //  7. Create normal containers.
 func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
+	klog.Errorf("Runtime SyncPod(%s) step 1", pod.Name)
 	// Step 1: Compute sandbox and container changes.
 	podContainerChanges := m.computePodActions(pod, podStatus)
 	klog.V(3).InfoS("computePodActions got for pod", "podActions", podContainerChanges, "pod", klog.KObj(pod))
@@ -681,6 +682,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		}
 	}
 
+	klog.Errorf("Runtime SyncPod(%s) step 23", pod.Name)
 	// Step 2: Kill the pod if the sandbox has changed.
 	if podContainerChanges.KillPod {
 		if podContainerChanges.CreateSandbox {
@@ -733,6 +735,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		podIPs = podStatus.IPs
 	}
 
+	klog.Errorf("Runtime SyncPod(%s) step 4", pod.Name)
 	// Step 4: Create a sandbox for the pod if necessary.
 	podSandboxID := podContainerChanges.SandboxID
 	if podContainerChanges.CreateSandbox {
@@ -867,6 +870,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		return nil
 	}
 
+	klog.Errorf("Runtime SyncPod(%s) step 5", pod.Name)
 	// Step 5: start ephemeral containers
 	// These are started "prior" to init containers to allow running ephemeral containers even when there
 	// are errors starting an init container. In practice init containers will start first since ephemeral
@@ -875,6 +879,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		start("ephemeral container", metrics.EphemeralContainer, ephemeralContainerStartSpec(&pod.Spec.EphemeralContainers[idx]))
 	}
 
+	klog.Errorf("Runtime SyncPod(%s) step 6", pod.Name)
 	// Step 6: start the init container.
 	if container := podContainerChanges.NextInitContainerToStart; container != nil {
 		// Start the next init container.
