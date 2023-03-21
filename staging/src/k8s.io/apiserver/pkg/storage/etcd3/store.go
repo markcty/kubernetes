@@ -160,6 +160,7 @@ func (s *store) Get(ctx context.Context, key string, opts storage.GetOptions, ou
 
 // Create implements storage.Interface.Create.
 func (s *store) Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64) error {
+	klog.Errorf("create a obj %s", getTypeName(obj))
 	preparedKey, err := s.prepareKey(key)
 	if err != nil {
 		return err
