@@ -188,9 +188,30 @@ func (m *manager) Start() {
 func (m *manager) GetPodStatus(uid types.UID) (v1.PodStatus, bool) {
 	m.podStatusesLock.RLock()
 	defer m.podStatusesLock.RUnlock()
-	status, ok := m.podStatuses[types.UID(m.podManager.TranslatePodUID(uid))]
+	uid = types.UID(m.podManager.TranslatePodUID(uid))
+	pod, ok := m.podManager.GetPodByUID(uid)
+	if ok {
+		if strings.HasPrefix(pod.Name, "fast") {
+			if fastPod, ok := FastPods[pod.Name]; ok {
+				if pod.UID == fastPod.realUID {
+					klog.Errorf("status manager get fast pod status hit")
+					uid = fastPod.realUID
+					status, ok := m.podStatuses[uid]
+					return status.status, ok
+				}
+			}
+		}
+	}
+	status, ok := m.podStatuses[uid]
 	return status.status, ok
 }
+
+type FastPodR struct {
+	fakeUID types.UID
+	realUID types.UID
+}
+
+var FastPods = map[string]*FastPodR{}
 
 func (m *manager) SetPodStatus(pod *v1.Pod, status v1.PodStatus) {
 	m.podStatusesLock.Lock()
@@ -272,7 +293,7 @@ func (m *manager) SetContainerStartup(podUID types.UID, containerID kubecontaine
 
 	pod, ok := m.podManager.GetPodByUID(podUID)
 	if !ok {
-		klog.V(4).InfoS("Pod has been deleted, no need to update startup", "podUID", string(podUID))
+		klog.Errorln("Pod has been deleted, no need to update startup", "podUID", string(podUID))
 		return
 	}
 
@@ -304,6 +325,10 @@ func (m *manager) SetContainerStartup(podUID types.UID, containerID kubecontaine
 	status := *oldStatus.status.DeepCopy()
 	containerStatus, _, _ = findContainerStatus(&status, containerID.String())
 	containerStatus.Started = &started
+
+	if strings.HasPrefix(pod.Name, "fast") {
+		klog.Errorf("fast set container startup for pod %s, container: %s, status: %+#v", pod.Name, containerID, status)
+	}
 
 	m.updateStatusInternal(pod, status, false)
 }
@@ -454,6 +479,21 @@ func checkContainerStateTransition(oldStatuses, newStatuses []v1.ContainerStatus
 // necessary. Returns whether an update was triggered.
 // This method IS NOT THREAD SAFE and must be called from a locked function.
 func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUpdate bool) bool {
+	if strings.HasPrefix(pod.Name, "fast") {
+		if fastPod, ok := FastPods[pod.Name]; ok {
+			if pod.UID != fastPod.fakeUID {
+				fastPod.realUID = pod.UID
+				klog.Errorf("status manager real fast pod arrive: %s, %+#v", pod.Name, fastPod)
+			}
+		} else {
+			FastPods[pod.Name] = &FastPodR{
+				fakeUID: pod.UID,
+				realUID: "",
+			}
+			klog.Errorf("status manager fast pod arrive: %s, %+#v", pod.Name, FastPods[pod.Name])
+		}
+	}
+
 	var oldStatus v1.PodStatus
 	cachedStatus, isCached := m.podStatuses[pod.UID]
 	if isCached {
@@ -546,6 +586,21 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		podNamespace: pod.Namespace,
 	}
 	m.podStatuses[pod.UID] = newStatus
+
+	if strings.HasPrefix(pod.Name, "fast") {
+		if fastPod, ok := FastPods[pod.Name]; ok {
+			if pod.UID == fastPod.fakeUID && len(fastPod.realUID) != 0 {
+				klog.Errorf("status manager sync pod hit %s, uid: %+#v", pod.Name, fastPod)
+				m.podStatuses[fastPod.realUID] = newStatus
+				m.podStatusChannel <- podStatusSyncRequest{fastPod.realUID, newStatus}
+			}
+			if pod.UID == fastPod.realUID {
+				m.podStatuses[pod.UID] = m.podStatuses[fastPod.fakeUID]
+			}
+		}
+		// jsonStr, _ := json.Marshal(m.po dStatuses)
+		klog.Errorf("fast pod %s statuses updated:, %+#v", pod.Name, m.podStatuses)
+	}
 
 	select {
 	case m.podStatusChannel <- podStatusSyncRequest{pod.UID, newStatus}:
@@ -648,6 +703,13 @@ func (m *manager) syncBatch() {
 
 // syncPod syncs the given status with the API server. The caller must not hold the lock.
 func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
+	pod, ok := m.podManager.GetPodByUID(uid)
+	if ok {
+		if strings.HasPrefix(pod.Name, "fast") {
+			klog.Errorf("syncPod update pod %s, %+#v", uid, status)
+		}
+	}
+
 	if !m.needsUpdate(uid, status) {
 		klog.V(1).InfoS("Status for pod is up-to-date; skipping", "podUID", uid)
 		return
@@ -656,7 +718,7 @@ func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
 	// TODO: make me easier to express from client code
 	pod, err := m.kubeClient.CoreV1().Pods(status.podNamespace).Get(context.TODO(), status.podName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		klog.V(3).InfoS("Pod does not exist on the server",
+		klog.Errorln("Pod does not exist on the server",
 			"podUID", uid,
 			"pod", klog.KRef(status.podNamespace, status.podName))
 		// If the Pod is deleted the status will be cleared in
@@ -664,7 +726,7 @@ func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
 		return
 	}
 	if err != nil {
-		klog.InfoS("Failed to get status for pod",
+		klog.Errorln("Failed to get status for pod",
 			"podUID", uid,
 			"pod", klog.KRef(status.podNamespace, status.podName),
 			"err", err)
@@ -674,7 +736,7 @@ func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
 	translatedUID := m.podManager.TranslatePodUID(pod.UID)
 	// Type convert original uid just for the purpose of comparison.
 	if len(translatedUID) > 0 && translatedUID != kubetypes.ResolvedPodUID(uid) {
-		klog.V(2).InfoS("Pod was deleted and then recreated, skipping status update",
+		klog.Errorln("Pod was deleted and then recreated, skipping status update",
 			"pod", klog.KObj(pod),
 			"oldPodUID", uid,
 			"podUID", translatedUID)
@@ -688,7 +750,7 @@ func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
 	klog.V(3).InfoS("Patch status for pod", "pod", klog.KObj(pod), "patch", string(patchBytes))
 
 	if err != nil {
-		klog.InfoS("Failed to update status for pod", "pod", klog.KObj(pod), "err", err)
+		klog.Errorf("Failed to update status for pod", "pod", klog.KObj(pod), "err", err)
 		return
 	}
 	if unchanged {

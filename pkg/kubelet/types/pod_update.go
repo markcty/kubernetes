@@ -60,6 +60,8 @@ const (
 	HTTPSource = "http"
 	// ApiserverSource identifies updates from Kubernetes API Server.
 	ApiserverSource = "api"
+	// Fast pod source
+	FastSource = "fast"
 	// AllSource identifies updates from all sources.
 	AllSource = "*"
 )

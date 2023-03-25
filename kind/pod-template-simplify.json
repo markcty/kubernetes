@@ -1,0 +1,108 @@
+{
+  "metadata": {
+    "name": "fastnginx",
+    "namespace": "default",
+    "uid": "3ab5b2e5-0e75-4171-8128-51af97297917",
+    "resourceVersion": "546",
+    "creationTimestamp": "2023-03-21T04:11:09Z",
+    "annotations": {
+      "kubernetes.io/config.seen": "2023-03-21T04:11:09.481725961Z",
+      "kubernetes.io/config.source": "api"
+    },
+    "managedFields": [
+      {
+        "manager": "kubectl-create",
+        "operation": "Update",
+        "apiVersion": "v1",
+        "time": "2023-03-21T04:11:09Z",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            "f:containers": {
+              "k:{\"name\":\"fastnginx\"}": {
+                ".": {},
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:ports": {
+                  ".": {},
+                  "k:{\"containerPort\":80,\"protocol\":\"TCP\"}": {
+                    ".": {},
+                    "f:containerPort": {},
+                    "f:protocol": {}
+                  }
+                },
+                "f:resources": {},
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {}
+              }
+            },
+            "f:dnsPolicy": {},
+            "f:enableServiceLinks": {},
+            "f:restartPolicy": {},
+            "f:schedulerName": {},
+            "f:securityContext": {},
+            "f:terminationGracePeriodSeconds": {}
+          }
+        }
+      }
+    ]
+  },
+  "spec": {
+    "volumes": [],
+    "containers": [
+      {
+        "name": "fastnginx",
+        "image": "nginx:1.14.2",
+        "ports": [
+          {
+            "containerPort": 80,
+            "protocol": "TCP"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [],
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "imagePullPolicy": "IfNotPresent"
+      }
+    ],
+    "restartPolicy": "Always",
+    "terminationGracePeriodSeconds": 30,
+    "dnsPolicy": "ClusterFirst",
+    "serviceAccountName": "default",
+    "serviceAccount": "default",
+    "nodeName": "kind-control-plane",
+    "securityContext": {},
+    "schedulerName": "default-scheduler",
+    "tolerations": [
+      {
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "effect": "NoExecute",
+        "tolerationSeconds": 300
+      },
+      {
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "effect": "NoExecute",
+        "tolerationSeconds": 300
+      }
+    ],
+    "priority": 0,
+    "enableServiceLinks": true,
+    "preemptionPolicy": "PreemptLowerPriority"
+  },
+  "status": {
+    "phase": "Pending",
+    "conditions": [
+      {
+        "type": "PodScheduled",
+        "status": "True",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2023-03-21T04:11:09Z"
+      }
+    ],
+    "qosClass": "BestEffort"
+  }
+}

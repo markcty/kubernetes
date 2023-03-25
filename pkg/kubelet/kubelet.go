@@ -19,6 +19,7 @@ package kubelet
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net"
@@ -281,6 +282,23 @@ func makePodSourceConfig(kubeCfg *kubeletconfiginternal.KubeletConfiguration, ku
 		klog.InfoS("Adding apiserver pod source")
 		config.NewSourceApiserver(kubeDeps.KubeClient, nodeName, nodeHasSynced, cfg.Channel(ctx, kubetypes.ApiserverSource))
 	}
+
+	go func() {
+		updates := cfg.Channel(context.TODO(), kubetypes.FastSource)
+		http.ListenAndServe(":10253", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			var pod v1.Pod
+			err := json.NewDecoder(req.Body).Decode(&pod)
+			if err != nil {
+				klog.Errorf("fast pod failed")
+				return
+			}
+			s, _ := json.Marshal(pod)
+			klog.Errorf("new fast pod: %s", string(s))
+			updates <- kubetypes.PodUpdate{Pods: []*v1.Pod{&pod}, Op: kubetypes.ADD, Source: kubetypes.HTTPSource}
+			fmt.Fprintf(w, "new fast pod %s\n", pod.Name)
+		}))
+	}()
+
 	return cfg, nil
 }
 
@@ -1520,6 +1538,29 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 // the most accurate information possible about an error situation to aid debugging.
 // Callers should not write an event if this operation returns an error.
 func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType, pod, mirrorPod *v1.Pod, podStatus *kubecontainer.PodStatus) (isTerminal bool, err error) {
+	fastStatus := kuberuntime.NormalPod
+	if strings.HasPrefix(pod.Name, "fast") {
+		if fastPod, ok := kuberuntime.FastPods[pod.Name]; ok {
+			if fastPod.RealUID == "" && fastPod.FakeUID != pod.UID {
+				fastPod.RealUID = pod.UID
+			}
+			if pod.UID == fastPod.FakeUID {
+				fastStatus = kuberuntime.FastPod
+				klog.Errorln("kubelet sync fast pod:", pod.Name)
+			} else if pod.UID == fastPod.RealUID {
+				fastStatus = kuberuntime.FastHitPod
+				klog.Errorln("kubelet sync fast hit pod:", pod.Name)
+			}
+		} else {
+			fastStatus = kuberuntime.FastPod
+			kuberuntime.FastPods[pod.Name] = &kuberuntime.FastPodR{
+				FakeUID: pod.UID,
+				RealUID: "",
+			}
+			klog.Errorln("kubelet sync fast pod:", pod.Name)
+		}
+	}
+
 	klog.Errorf("Sync pod %s", pod.Name)
 	klog.V(4).InfoS("syncPod enter", "pod", klog.KObj(pod), "podUID", pod.UID)
 	defer func() {
@@ -1532,8 +1573,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 	if firstSeenTimeStr, ok := pod.Annotations[kubetypes.ConfigFirstSeenAnnotationKey]; ok {
 		firstSeenTime = kubetypes.ConvertToTimestamp(firstSeenTimeStr).Get()
 	}
-
-	klog.Errorf("sync pod probe 1")
 
 	// Record pod worker start latency if being created
 	// TODO: make pod workers record their own latencies
@@ -1548,8 +1587,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 				"pod", klog.KObj(pod))
 		}
 	}
-
-	klog.Errorf("sync pod probe 2")
 
 	// Generate final API pod status with pod and status manager status
 	apiPodStatus := kl.generateAPIPodStatus(pod, podStatus)
@@ -1570,8 +1607,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		isTerminal = true
 		return isTerminal, nil
 	}
-
-	klog.Errorf("sync pod probe 3")
 
 	// If the pod should not be running, we request the pod's containers be stopped. This is not the same
 	// as termination (we want to stop the pod, but potentially restart it later if soft admission allows
@@ -1598,8 +1633,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
-	klog.Errorf("sync pod probe 4")
-
 	// Record the time it takes for the pod to become running
 	// since kubelet first saw the pod if firstSeenTime is set.
 	existingStatus, ok := kl.statusManager.GetPodStatus(pod.UID)
@@ -1608,11 +1641,7 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		metrics.PodStartDuration.Observe(metrics.SinceInSeconds(firstSeenTime))
 	}
 
-	klog.Errorf("sync pod probe 5")
-
 	kl.statusManager.SetPodStatus(pod, apiPodStatus)
-
-	klog.Errorf("sync pod probe 6")
 
 	// Pods that are not runnable must be stopped - return a typed error to the pod worker
 	if !runnable.Admit {
@@ -1631,8 +1660,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		return false, syncErr
 	}
 
-	klog.Errorf("sync pod probe 7")
-
 	// If the network plugin is not ready, only start the pod if it uses the host network
 	if err := kl.runtimeState.networkErrors(); err != nil && !kubecontainer.IsHostNetworkPod(pod) {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.NetworkNotReady, "%s: %v", NetworkNotReadyErrorMsg, err)
@@ -1648,8 +1675,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 			kl.configMapManager.RegisterPod(pod)
 		}
 	}
-
-	klog.Errorf("sync pod probe 8")
 
 	// Create Cgroups for the pod and apply resource parameters
 	// to them if cgroups-per-qos flag is enabled.
@@ -1701,10 +1726,8 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
-	klog.Errorf("sync pod probe 9")
-
 	// Create Mirror Pod for Static Pod if it doesn't already exist
-	if kubetypes.IsStaticPod(pod) {
+	if kubetypes.IsStaticPod(pod) && fastStatus != kuberuntime.FastPod {
 		deleted := false
 		if mirrorPod != nil {
 			if mirrorPod.DeletionTimestamp != nil || !kl.podManager.IsMirrorPodOf(mirrorPod, pod) {
@@ -1734,8 +1757,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
-	klog.Errorf("sync pod probe 10")
-
 	// Make data directories for the pod
 	if err := kl.makePodDataDirs(pod); err != nil {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.FailedToMakePodDataDirectories, "error making pod data directories: %v", err)
@@ -1743,8 +1764,6 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		return false, err
 	}
 
-	klog.Errorf("sync pod probe 11")
-	// Volume manager will not mount volumes for terminating pods
 	// TODO: once context cancellation is added this check can be removed
 	if !kl.podWorkers.IsPodTerminationRequested(pod.UID) {
 		// Wait for volumes to attach/mount
@@ -1755,15 +1774,11 @@ func (kl *Kubelet) syncPod(ctx context.Context, updateType kubetypes.SyncPodType
 		}
 	}
 
-	klog.Errorf("sync pod probe 12")
-
 	// Fetch the pull secrets for the pod
 	pullSecrets := kl.getPullSecretsForPod(pod)
 
 	// Ensure the pod is being probed
 	kl.probeManager.AddPod(pod)
-
-	klog.Errorf("sync pod probe 13")
 
 	// Call the container runtime's SyncPod callback
 	result := kl.containerRuntime.SyncPod(pod, podStatus, pullSecrets, kl.backOff)
@@ -2115,12 +2130,6 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 		if !open {
 			klog.ErrorS(nil, "Update channel is closed, exiting the sync loop")
 			return false
-		}
-
-		for _, pod := range u.Pods {
-			if strings.Contains(pod.Name, "nginx") {
-				klog.Errorf("SyncLoop get pod %s", pod.Name)
-			}
 		}
 
 		switch u.Op {

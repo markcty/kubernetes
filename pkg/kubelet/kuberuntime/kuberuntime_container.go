@@ -164,6 +164,13 @@ func calcRestartCountByLogDir(path string) (int, error) {
 	return restartCount, nil
 }
 
+type fastContainer struct {
+	containerId     string
+	containerConfig *runtimeapi.ContainerConfig
+}
+
+var fastContainers = map[string]*fastContainer{}
+
 // startContainer starts a container and returns a message indicates why it is failed on error.
 // It starts the container through the following steps:
 // * pull the image
@@ -171,7 +178,24 @@ func calcRestartCountByLogDir(path string) (int, error) {
 // * start the container
 // * run the post start lifecycle hooks (if applicable)
 func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandboxConfig *runtimeapi.PodSandboxConfig, spec *startSpec, pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, podIP string, podIPs []string) (string, error) {
-	klog.Errorf("Starting to bring up container %s", pod.Name)
+	/// fast inject
+	fastStatus := NormalPod
+	if strings.HasPrefix(pod.Name, "fast") {
+		if _, ok := fastContainers[pod.Name]; ok {
+			klog.Errorln("container fast hit pod:", pod.Name)
+			fastStatus = FastHitPod
+		} else {
+			klog.Errorln("container fast pod:", pod.Name)
+			fastStatus = FastPod
+			fastContainers[pod.Name] = &fastContainer{
+				containerId:     "",
+				containerConfig: nil,
+			}
+		}
+		klog.Errorf("Starting to bring up pod %s, uid: %s, spec: %+#v, sandboxConfig: %+#v", pod.Name, pod.UID, spec, podSandboxConfig)
+	}
+	///
+
 	container := spec.container
 
 	// Step 1: pull the image.
@@ -181,117 +205,133 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
 		return msg, err
 	}
+	klog.Errorf("successfully pull image %s", pod.Name)
 
 	// Step 2: create the container.
 	// For a new container, the RestartCount should be 0
-	restartCount := 0
-	containerStatus := podStatus.FindContainerStatusByName(container.Name)
-	if containerStatus != nil {
-		restartCount = containerStatus.RestartCount + 1
+	if fastStatus == FastHitPod {
+		cid := fastContainers[pod.Name].containerId
+		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
+		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
+		klog.Errorf("pod %s(%s)'s container %s fast hit, skipping bring up", pod.Name, pod.UID, cid)
 	} else {
-		// The container runtime keeps state on container statuses and
-		// what the container restart count is. When nodes are rebooted
-		// some container runtimes clear their state which causes the
-		// restartCount to be reset to 0. This causes the logfile to
-		// start at 0.log, which either overwrites or appends to the
-		// already existing log.
-		//
-		// We are checking to see if the log directory exists, and find
-		// the latest restartCount by checking the log name -
-		// {restartCount}.log - and adding 1 to it.
-		logDir := BuildContainerLogsDirectory(pod.Namespace, pod.Name, pod.UID, container.Name)
-		restartCount, err = calcRestartCountByLogDir(logDir)
-		if err != nil {
-			klog.InfoS("Log directory exists but could not calculate restartCount", "logDir", logDir, "err", err)
-		}
-	}
-
-	target, err := spec.getTargetID(podStatus)
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
-		return s.Message(), ErrCreateContainerConfig
-	}
-
-	containerConfig, cleanupAction, err := m.generateContainerConfig(container, pod, restartCount, podIP, imageRef, podIPs, target)
-	if cleanupAction != nil {
-		defer cleanupAction()
-	}
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
-		return s.Message(), ErrCreateContainerConfig
-	}
-
-	err = m.internalLifecycle.PreCreateContainer(pod, container, containerConfig)
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Internal PreCreateContainer hook failed: %v", s.Message())
-		return s.Message(), ErrPreCreateHook
-	}
-
-	containerID, err := m.runtimeService.CreateContainer(podSandboxID, containerConfig, podSandboxConfig)
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
-		return s.Message(), ErrCreateContainer
-	}
-	err = m.internalLifecycle.PreStartContainer(pod, container, containerID)
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Internal PreStartContainer hook failed: %v", s.Message())
-		return s.Message(), ErrPreStartHook
-	}
-	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
-
-	// Step 3: start the container.
-	err = m.runtimeService.StartContainer(containerID)
-	if err != nil {
-		s, _ := grpcstatus.FromError(err)
-		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Error: %v", s.Message())
-		return s.Message(), kubecontainer.ErrRunContainer
-	}
-	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
-
-	// Symlink container logs to the legacy container log location for cluster logging
-	// support.
-	// TODO(random-liu): Remove this after cluster logging supports CRI container log path.
-	containerMeta := containerConfig.GetMetadata()
-	sandboxMeta := podSandboxConfig.GetMetadata()
-	legacySymlink := legacyLogSymlink(containerID, containerMeta.Name, sandboxMeta.Name,
-		sandboxMeta.Namespace)
-	containerLog := filepath.Join(podSandboxConfig.LogDirectory, containerConfig.LogPath)
-	// only create legacy symlink if containerLog path exists (or the error is not IsNotExist).
-	// Because if containerLog path does not exist, only dangling legacySymlink is created.
-	// This dangling legacySymlink is later removed by container gc, so it does not make sense
-	// to create it in the first place. it happens when journald logging driver is used with docker.
-	if _, err := m.osInterface.Stat(containerLog); !os.IsNotExist(err) {
-		if err := m.osInterface.Symlink(containerLog, legacySymlink); err != nil {
-			klog.ErrorS(err, "Failed to create legacy symbolic link", "path", legacySymlink,
-				"containerID", containerID, "containerLogPath", containerLog)
-		}
-	}
-
-	// Step 4: execute the post start hook.
-	if container.Lifecycle != nil && container.Lifecycle.PostStart != nil {
-		kubeContainerID := kubecontainer.ContainerID{
-			Type: m.runtimeName,
-			ID:   containerID,
-		}
-		msg, handlerErr := m.runner.Run(kubeContainerID, pod, container, container.Lifecycle.PostStart)
-		if handlerErr != nil {
-			klog.ErrorS(handlerErr, "Failed to execute PostStartHook", "pod", klog.KObj(pod),
-				"podUID", pod.UID, "containerName", container.Name, "containerID", kubeContainerID.String())
-			m.recordContainerEvent(pod, container, kubeContainerID.ID, v1.EventTypeWarning, events.FailedPostStartHook, msg)
-			if err := m.killContainer(pod, kubeContainerID, container.Name, "FailedPostStartHook", reasonFailedPostStartHook, nil); err != nil {
-				klog.ErrorS(err, "Failed to kill container", "pod", klog.KObj(pod),
-					"podUID", pod.UID, "containerName", container.Name, "containerID", kubeContainerID.String())
+		restartCount := 0
+		containerStatus := podStatus.FindContainerStatusByName(container.Name)
+		if containerStatus != nil {
+			restartCount = containerStatus.RestartCount + 1
+		} else {
+			// The container runtime keeps state on container statuses and
+			// what the container restart count is. When nodes are rebooted
+			// some container runtimes clear their state which causes the
+			// restartCount to be reset to 0. This causes the logfile to
+			// start at 0.log, which either overwrites or appends to the
+			// already existing log.
+			//
+			// We are checking to see if the log directory exists, and find
+			// the latest restartCount by checking the log name -
+			// {restartCount}.log - and adding 1 to it.
+			logDir := BuildContainerLogsDirectory(pod.Namespace, pod.Name, pod.UID, container.Name)
+			restartCount, err = calcRestartCountByLogDir(logDir)
+			if err != nil {
+				klog.InfoS("Log directory exists but could not calculate restartCount", "logDir", logDir, "err", err)
 			}
-			return msg, ErrPostStartHook
 		}
-	}
 
-	klog.Errorf("Finish bring up pod %s", pod.Name)
+		target, err := spec.getTargetID(podStatus)
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
+			return s.Message(), ErrCreateContainerConfig
+		}
+
+		containerConfig, cleanupAction, err := m.generateContainerConfig(container, pod, restartCount, podIP, imageRef, podIPs, target)
+		if cleanupAction != nil {
+			defer cleanupAction()
+		}
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
+			return s.Message(), ErrCreateContainerConfig
+		}
+
+		err = m.internalLifecycle.PreCreateContainer(pod, container, containerConfig)
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Internal PreCreateContainer hook failed: %v", s.Message())
+			return s.Message(), ErrPreCreateHook
+		}
+
+		containerID, err := m.runtimeService.CreateContainer(podSandboxID, containerConfig, podSandboxConfig)
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
+			return s.Message(), ErrCreateContainer
+		}
+		err = m.internalLifecycle.PreStartContainer(pod, container, containerID)
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Internal PreStartContainer hook failed: %v", s.Message())
+			return s.Message(), ErrPreStartHook
+		}
+
+		m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
+		klog.Errorf("successfully create container %s", pod.Name)
+
+		// Step 3: start the container.
+		err = m.runtimeService.StartContainer(containerID)
+		if err != nil {
+			s, _ := grpcstatus.FromError(err)
+			m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToStartContainer, "Error: %v", s.Message())
+			return s.Message(), kubecontainer.ErrRunContainer
+		}
+		m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
+
+		if fastStatus == FastPod {
+			fastContainers[pod.Name].containerId = containerID
+			fastContainers[pod.Name].containerConfig = containerConfig
+		}
+		klog.Errorf("pod %s's container %s successfully started", pod.Name, containerID)
+
+		// Symlink container logs to the legacy container log location for cluster logging
+		// support.
+		// TODO(random-liu): Remove this after cluster logging supports CRI container log path.
+		containerMeta := containerConfig.GetMetadata()
+		sandboxMeta := podSandboxConfig.GetMetadata()
+		legacySymlink := legacyLogSymlink(containerID, containerMeta.Name, sandboxMeta.Name,
+			sandboxMeta.Namespace)
+		containerLog := filepath.Join(podSandboxConfig.LogDirectory, containerConfig.LogPath)
+		// only create legacy symlink if containerLog path exists (or the error is not IsNotExist).
+		// Because if containerLog path does not exist, only dangling legacySymlink is created.
+		// This dangling legacySymlink is later removed by container gc, so it does not make sense
+		// to create it in the first place. it happens when journald logging driver is used with docker.
+		if _, err := m.osInterface.Stat(containerLog); !os.IsNotExist(err) {
+			if err := m.osInterface.Symlink(containerLog, legacySymlink); err != nil {
+				klog.ErrorS(err, "Failed to create legacy symbolic link", "path", legacySymlink,
+					"containerID", containerID, "containerLogPath", containerLog)
+			}
+		}
+		klog.Errorf("successfully start container %s, uid: %s", pod.Name, pod.UID)
+
+		// Step 4: execute the post start hook.
+		if container.Lifecycle != nil && container.Lifecycle.PostStart != nil {
+			kubeContainerID := kubecontainer.ContainerID{
+				Type: m.runtimeName,
+				ID:   containerID,
+			}
+			msg, handlerErr := m.runner.Run(kubeContainerID, pod, container, container.Lifecycle.PostStart)
+			if handlerErr != nil {
+				klog.ErrorS(handlerErr, "Failed to execute PostStartHook", "pod", klog.KObj(pod),
+					"podUID", pod.UID, "containerName", container.Name, "containerID", kubeContainerID.String())
+				m.recordContainerEvent(pod, container, kubeContainerID.ID, v1.EventTypeWarning, events.FailedPostStartHook, msg)
+				if err := m.killContainer(pod, kubeContainerID, container.Name, "FailedPostStartHook", reasonFailedPostStartHook, nil); err != nil {
+					klog.ErrorS(err, "Failed to kill container", "pod", klog.KObj(pod),
+						"podUID", pod.UID, "containerName", container.Name, "containerID", kubeContainerID.String())
+				}
+				return msg, ErrPostStartHook
+			}
+		}
+		klog.Errorf("Finish bring up pod %s, uid: %s", pod.Name, pod.UID)
+	}
 
 	return "", nil
 }

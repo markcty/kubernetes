@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
@@ -656,6 +657,25 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 	return changes
 }
 
+const (
+	NormalPod  int = 1
+	FastPod    int = 2
+	FastHitPod int = 3
+)
+
+type FastPodR struct {
+	podIps []string
+	// create sendbox return
+	csPodSandboxID   string
+	csMsg            string
+	csErr            error
+	podSandboxConfig *runtimeapi.PodSandboxConfig
+	FakeUID          kubetypes.UID
+	RealUID          kubetypes.UID
+}
+
+var FastPods = map[string]*FastPodR{}
+
 // SyncPod syncs the running pod into the desired pod by executing following steps:
 //
 //  1. Compute sandbox and container changes.
@@ -666,10 +686,9 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 //  6. Create init containers.
 //  7. Create normal containers.
 func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
-	klog.Errorf("Runtime SyncPod(%s) step 1", pod.Name)
 	// Step 1: Compute sandbox and container changes.
 	podContainerChanges := m.computePodActions(pod, podStatus)
-	klog.V(3).InfoS("computePodActions got for pod", "podActions", podContainerChanges, "pod", klog.KObj(pod))
+	klog.Errorf("computePodActions got for pod %s, podActions: %+#v", pod.Name, podContainerChanges)
 	if podContainerChanges.CreateSandbox {
 		ref, err := ref.GetReference(legacyscheme.Scheme, pod)
 		if err != nil {
@@ -678,17 +697,31 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		if podContainerChanges.SandboxID != "" {
 			m.recorder.Eventf(ref, v1.EventTypeNormal, events.SandboxChanged, "Pod sandbox changed, it will be killed and re-created.")
 		} else {
-			klog.V(4).InfoS("SyncPod received new pod, will create a sandbox for it", "pod", klog.KObj(pod))
+			klog.Errorln("SyncPod received new pod, will create a sandbox for it", "pod", klog.KObj(pod))
 		}
 	}
 
-	klog.Errorf("Runtime SyncPod(%s) step 23", pod.Name)
+	/// fast inject
+	fastStatus := NormalPod
+	if strings.HasPrefix(pod.Name, "fast") {
+		if fastPod, ok := FastPods[pod.Name]; ok {
+			if pod.UID == fastPod.FakeUID {
+				fastStatus = FastPod
+				klog.Errorln("runtime sync fast pod:", pod.Name)
+			} else if pod.UID == fastPod.RealUID {
+				fastStatus = FastHitPod
+				klog.Errorln("runtime sync fast hit pod:", pod.Name)
+			}
+		}
+	}
+	///
+
 	// Step 2: Kill the pod if the sandbox has changed.
 	if podContainerChanges.KillPod {
 		if podContainerChanges.CreateSandbox {
-			klog.V(4).InfoS("Stopping PodSandbox for pod, will start new one", "pod", klog.KObj(pod))
+			klog.Errorln("Stopping PodSandbox for pod, will start new one", "pod", klog.KObj(pod))
 		} else {
-			klog.V(4).InfoS("Stopping PodSandbox for pod, because all other containers are dead", "pod", klog.KObj(pod))
+			klog.Errorln("Stopping PodSandbox for pod, because all other containers are dead", "pod", klog.KObj(pod))
 		}
 
 		killResult := m.killPodWithSyncResult(pod, kubecontainer.ConvertPodStatusToRunningPod(m.runtimeName, podStatus), nil)
@@ -704,7 +737,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 	} else {
 		// Step 3: kill any running containers in this pod which are not to keep.
 		for containerID, containerInfo := range podContainerChanges.ContainersToKill {
-			klog.V(3).InfoS("Killing unwanted container for pod", "containerName", containerInfo.name, "containerID", containerID, "pod", klog.KObj(pod))
+			klog.Errorln("Killing unwanted container for pod", "containerName", containerInfo.name, "containerID", containerID, "pod", klog.KObj(pod))
 			killContainerResult := kubecontainer.NewSyncResult(kubecontainer.KillContainer, containerInfo.name)
 			result.AddSyncResult(killContainerResult)
 			if err := m.killContainer(pod, containerID, containerInfo.name, containerInfo.message, containerInfo.reason, nil); err != nil {
@@ -718,7 +751,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 	// Keep terminated init containers fairly aggressively controlled
 	// This is an optimization because container removals are typically handled
 	// by container garbage collector.
-	m.pruneInitContainersBeforeStart(pod, podStatus)
+	// m.pruneInitContainersBeforeStart(pod, podStatus)
 
 	// We pass the value of the PRIMARY podIP and list of podIPs down to
 	// generatePodSandboxConfig and generateContainerConfig, which in turn
@@ -735,14 +768,13 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		podIPs = podStatus.IPs
 	}
 
-	klog.Errorf("Runtime SyncPod(%s) step 4", pod.Name)
 	// Step 4: Create a sandbox for the pod if necessary.
 	podSandboxID := podContainerChanges.SandboxID
 	if podContainerChanges.CreateSandbox {
 		var msg string
 		var err error
 
-		klog.V(4).InfoS("Creating PodSandbox for pod", "pod", klog.KObj(pod))
+		klog.Errorln("Creating PodSandbox for pod", "pod", klog.KObj(pod))
 		metrics.StartedPodsTotal.Inc()
 		createSandboxResult := kubecontainer.NewSyncResult(kubecontainer.CreatePodSandbox, format.Pod(pod))
 		result.AddSyncResult(createSandboxResult)
@@ -757,7 +789,17 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		// When runc supports slash as sysctl separator, this function can no longer be used.
 		sysctl.ConvertPodSysctlsVariableToDotsSeparator(pod.Spec.SecurityContext)
 
-		podSandboxID, msg, err = m.createPodSandbox(pod, podContainerChanges.Attempt)
+		if fastStatus == NormalPod {
+			podSandboxID, msg, err = m.createPodSandbox(pod, podContainerChanges.Attempt)
+		} else if fastStatus == FastPod {
+			podSandboxID, msg, err = m.createPodSandbox(pod, podContainerChanges.Attempt)
+			FastPods[pod.Name].csPodSandboxID = podSandboxID
+			FastPods[pod.Name].csMsg = msg
+			FastPods[pod.Name].csErr = err
+		} else if fastStatus == FastHitPod {
+			podSandboxID, msg, err = FastPods[pod.Name].csPodSandboxID, FastPods[pod.Name].csMsg, FastPods[pod.Name].csErr
+		}
+
 		if err != nil {
 			// createPodSandbox can return an error from CNI, CSI,
 			// or CRI if the Pod has been deleted while the POD is
@@ -767,7 +809,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 			// SyncPod can still be running when we get here, which
 			// means the PodWorker has not acked the deletion.
 			if m.podStateProvider.IsPodTerminationRequested(pod.UID) {
-				klog.V(4).InfoS("Pod was deleted and sandbox failed to be created", "pod", klog.KObj(pod), "podUID", pod.UID)
+				klog.Errorln("Pod was deleted and sandbox failed to be created", "pod", klog.KObj(pod), "podUID", pod.UID)
 				return
 			}
 			metrics.StartedPodsErrorsTotal.Inc()
@@ -780,7 +822,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 			m.recorder.Eventf(ref, v1.EventTypeWarning, events.FailedCreatePodSandBox, "Failed to create pod sandbox: %v", err)
 			return
 		}
-		klog.V(4).InfoS("Created PodSandbox for pod", "podSandboxID", podSandboxID, "pod", klog.KObj(pod))
+		klog.Errorln("Created PodSandbox for pod", "podSandboxID", podSandboxID, "pod", klog.KObj(pod))
 
 		resp, err := m.runtimeService.PodSandboxStatus(podSandboxID, false)
 		if err != nil {
@@ -802,8 +844,15 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		// host-network, we may use a stale IP.
 		if !kubecontainer.IsHostNetworkPod(pod) {
 			// Overwrite the podIPs passed in the pod status, since we just started the pod sandbox.
-			podIPs = m.determinePodSandboxIPs(pod.Namespace, pod.Name, resp.GetStatus())
-			klog.V(4).InfoS("Determined the ip for pod after sandbox changed", "IPs", podIPs, "pod", klog.KObj(pod))
+			if fastStatus == NormalPod {
+				podIPs = m.determinePodSandboxIPs(pod.Namespace, pod.Name, resp.GetStatus())
+			} else if fastStatus == FastPod {
+				podIPs = m.determinePodSandboxIPs(pod.Namespace, pod.Name, resp.GetStatus())
+				FastPods[pod.Name].podIps = podIPs
+			} else if fastStatus == FastHitPod {
+				podIPs = FastPods[pod.Name].podIps
+			}
+			klog.Errorln("Determined the ip for pod after sandbox changed", "IPs", podIPs, "pod", klog.KObj(pod))
 		}
 	}
 
@@ -818,7 +867,16 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 	// Get podSandboxConfig for containers to start.
 	configPodSandboxResult := kubecontainer.NewSyncResult(kubecontainer.ConfigPodSandbox, podSandboxID)
 	result.AddSyncResult(configPodSandboxResult)
-	podSandboxConfig, err := m.generatePodSandboxConfig(pod, podContainerChanges.Attempt)
+	var err error
+	var podSandboxConfig *runtimeapi.PodSandboxConfig
+	if fastStatus == NormalPod {
+		podSandboxConfig, err = m.generatePodSandboxConfig(pod, podContainerChanges.Attempt)
+	} else if fastStatus == FastPod {
+		podSandboxConfig, err = m.generatePodSandboxConfig(pod, podContainerChanges.Attempt)
+		FastPods[pod.Name].podSandboxConfig = podSandboxConfig
+	} else if fastStatus == FastHitPod {
+		podSandboxConfig, err = FastPods[pod.Name].podSandboxConfig, nil
+	}
 	if err != nil {
 		message := fmt.Sprintf("GeneratePodSandboxConfig for pod %q failed: %v", format.Pod(pod), err)
 		klog.ErrorS(err, "GeneratePodSandboxConfig for pod failed", "pod", klog.KObj(pod))
@@ -838,7 +896,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		isInBackOff, msg, err := m.doBackOff(pod, spec.container, podStatus, backOff)
 		if isInBackOff {
 			startContainerResult.Fail(err, msg)
-			klog.V(4).InfoS("Backing Off restarting container in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod))
+			klog.Errorln("Backing Off restarting container in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod))
 			return err
 		}
 
@@ -846,8 +904,13 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		if sc.HasWindowsHostProcessRequest(pod, spec.container) {
 			metrics.StartedHostProcessContainersTotal.WithLabelValues(metricLabel).Inc()
 		}
-		klog.V(4).InfoS("Creating container in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod))
+		klog.Errorln("Creating container in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod))
 		// NOTE (aramase) podIPs are populated for single stack and dual stack clusters. Send only podIPs.
+		if fastStatus == FastHitPod {
+			klog.Errorf("fast call start container, typeName: %s, startSpec: %+#v", typeName, spec)
+		} else {
+			klog.Errorf("call start container, typeName: %s, startSpec: %+#v", typeName, spec)
+		}
 		if msg, err := m.startContainer(podSandboxID, podSandboxConfig, spec, pod, podStatus, pullSecrets, podIP, podIPs); err != nil {
 			// startContainer() returns well-defined error codes that have reasonable cardinality for metrics and are
 			// useful to cluster administrators to distinguish "server errors" from "user errors".
@@ -860,7 +923,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 			// repetitive log spam
 			switch {
 			case err == images.ErrImagePullBackOff:
-				klog.V(3).InfoS("Container start failed in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod), "containerMessage", msg, "err", err)
+				klog.Errorln("Container start failed in pod", "containerType", typeName, "container", spec.container, "pod", klog.KObj(pod), "containerMessage", msg, "err", err)
 			default:
 				utilruntime.HandleError(fmt.Errorf("%v %+v start failed in pod %v: %v: %s", typeName, spec.container, format.Pod(pod), err, msg))
 			}
@@ -870,7 +933,6 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		return nil
 	}
 
-	klog.Errorf("Runtime SyncPod(%s) step 5", pod.Name)
 	// Step 5: start ephemeral containers
 	// These are started "prior" to init containers to allow running ephemeral containers even when there
 	// are errors starting an init container. In practice init containers will start first since ephemeral
@@ -879,7 +941,6 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		start("ephemeral container", metrics.EphemeralContainer, ephemeralContainerStartSpec(&pod.Spec.EphemeralContainers[idx]))
 	}
 
-	klog.Errorf("Runtime SyncPod(%s) step 6", pod.Name)
 	// Step 6: start the init container.
 	if container := podContainerChanges.NextInitContainerToStart; container != nil {
 		// Start the next init container.
@@ -888,7 +949,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, podStatus *kubecontaine
 		}
 
 		// Successfully started the container; clear the entry in the failure
-		klog.V(4).InfoS("Completed init container for pod", "containerName", container.Name, "pod", klog.KObj(pod))
+		klog.Errorln("Completed init container for pod", "containerName", container.Name, "pod", klog.KObj(pod))
 	}
 
 	// Step 7: start containers in podContainerChanges.ContainersToStart.
