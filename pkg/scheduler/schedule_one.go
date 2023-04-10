@@ -66,9 +66,23 @@ var clearNominatedNode = &framework.NominatingInfo{NominatingMode: framework.Mod
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	podInfo := sched.NextPod()
-	if podInfo.Pod != nil {
-		klog.Errorf("Schedule pod %s at %d", podInfo.Pod.Name, time.Now().UnixMicro())
+
+	fastStatus := internalqueue.NormalPod
+	fastPod, ok := internalqueue.FastPods[podInfo.Pod.Name]
+	if ok {
+		if fastPod.State == internalqueue.FastHitPod {
+			fastStatus = internalqueue.FastHitPod
+		} else {
+			fastStatus = internalqueue.FastPod
+		}
 	}
+	if fastStatus == internalqueue.FastPod {
+		klog.Errorln("schecule fast pod", podInfo.Pod.Name)
+	} else {
+		klog.Errorln("skip scheculing fast hit pod", podInfo.Pod.Name)
+		return
+	}
+
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
 		return
@@ -196,6 +210,9 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	}
 
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
+	if fastStatus == internalqueue.FastPod {
+		return
+	}
 	go func() {
 		bindingCycleCtx, cancel := context.WithCancel(ctx)
 		defer cancel()

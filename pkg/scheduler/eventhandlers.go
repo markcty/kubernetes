@@ -17,7 +17,9 @@ limitations under the License.
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 
@@ -113,6 +115,10 @@ func (sched *Scheduler) deleteNodeFromCache(obj interface{}) {
 
 func (sched *Scheduler) addPodToSchedulingQueue(obj interface{}) {
 	pod := obj.(*v1.Pod)
+	if strings.HasPrefix(pod.Name, "fast") {
+		s, _ := json.Marshal(pod)
+		klog.Errorln("add pod to scheduling queue:", string(s))
+	}
 	klog.V(3).InfoS("Add event for unscheduled pod", "pod", klog.KObj(pod))
 	if err := sched.SchedulingQueue.Add(pod); err != nil {
 		utilruntime.HandleError(fmt.Errorf("unable to queue %T: %v", obj, err))
@@ -306,6 +312,21 @@ func addAllEventHandlers(
 			},
 		},
 	)
+
+	go func() {
+		http.ListenAndServe(":12333", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			var pod v1.Pod
+			err := json.NewDecoder(req.Body).Decode(&pod)
+			if err != nil {
+				klog.Errorf("fast pod failed")
+				return
+			}
+			s, _ := json.Marshal(pod)
+			klog.Errorf("http receive new fast pod: %s", string(s))
+			sched.addPodToSchedulingQueue(&pod)
+			fmt.Fprintf(w, "new fast pod %s\n", pod.Name)
+		}))
+	}()
 
 	informerFactory.Core().V1().Nodes().Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{

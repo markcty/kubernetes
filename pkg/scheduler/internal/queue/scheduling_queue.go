@@ -29,6 +29,7 @@ package queue
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -291,11 +292,42 @@ func (p *PriorityQueue) Run() {
 	go wait.Until(p.flushUnschedulablePodsLeftover, 30*time.Second, p.stop)
 }
 
+const (
+	NormalPod  int = 1
+	FastPod    int = 2
+	FastHitPod int = 3
+)
+
+type FastPodR struct {
+	State int
+}
+
+var FastPods = map[string]*FastPodR{}
+
 // Add adds a pod to the active queue. It should be called only when a new pod
 // is added so there is no chance the pod is already in active/unschedulable/backoff queues
 func (p *PriorityQueue) Add(pod *v1.Pod) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+
+	fastStatus := NormalPod
+	if strings.HasPrefix(pod.Name, "fast") {
+		if fastPod, ok := FastPods[pod.Name]; ok {
+			fastStatus = FastHitPod
+			fastPod.State = FastHitPod
+		} else {
+			fastStatus = FastPod
+			FastPods[pod.Name] = &FastPodR{State: FastPod}
+		}
+		var s string
+		if fastStatus == FastPod {
+			s = "FastPod"
+		} else {
+			s = "FastHitPod"
+		}
+		klog.Errorln("Scheduling queue receive", s, "pod")
+	}
+
 	pInfo := p.newQueuedPodInfo(pod)
 	if err := p.activeQ.Add(pInfo); err != nil {
 		klog.ErrorS(err, "Error adding pod to the active queue", "pod", klog.KObj(pod))
