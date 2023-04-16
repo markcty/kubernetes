@@ -299,7 +299,11 @@ const (
 )
 
 type FastPodR struct {
-	State int
+	State          int
+	SuggestedHost  string
+	EvaluatedNodes int
+	FeasibleNodes  int
+	ScheduleError  error
 }
 
 var FastPods = map[string]*FastPodR{}

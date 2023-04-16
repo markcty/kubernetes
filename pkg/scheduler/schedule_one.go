@@ -17,9 +17,13 @@ limitations under the License.
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -44,6 +48,10 @@ import (
 	utiltrace "k8s.io/utils/trace"
 )
 
+var NodeAddr = map[string]string{
+	"kind-control-plane": "http://localhost:10253",
+}
+
 const (
 	// SchedulerError is the reason recorded for events when an error occurs during scheduling a pod.
 	SchedulerError = "SchedulerError"
@@ -63,6 +71,51 @@ const (
 
 var clearNominatedNode = &framework.NominatingInfo{NominatingMode: framework.ModeOverride, NominatedNodeName: ""}
 
+func sendFastPodToNode(pod *v1.Pod, node string) {
+	addr, ok := NodeAddr[node]
+	if !ok {
+		klog.Errorf("No predefined node %s", node)
+		return
+	}
+
+	fastPod := pod.DeepCopy()
+	fastPod.Spec.NodeName = node
+	fastPod.Status.Conditions = append(fastPod.Status.Conditions, v1.PodCondition{
+		Type:               "PodScheduled",
+		Status:             "True",
+		LastTransitionTime: metav1.Now(),
+	})
+	fastPod.Spec.Volumes = make([]v1.Volume, 0)
+	for i := 0; i < len(fastPod.Spec.Containers); i++ {
+		fastPod.Spec.Containers[i].VolumeMounts = make([]v1.VolumeMount, 0)
+	}
+
+	s, err := json.Marshal(fastPod)
+	if err != nil {
+		klog.Errorln(err)
+		return
+	}
+	request, err := http.NewRequest("POST", addr, bytes.NewBuffer(s))
+	request.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	if err != nil {
+		klog.Errorln(err)
+		return
+	}
+
+	client := &http.Client{}
+	klog.Errorf("fast pod sent to node %s, content: %s", node, s)
+	response, err := client.Do(request)
+	if err != nil {
+		klog.Errorln(err)
+	}
+	defer response.Body.Close()
+
+	klog.Errorln("fast response Status:", response.Status)
+	klog.Errorln("fast response Headers:", response.Header)
+	body, _ := ioutil.ReadAll(response.Body)
+	klog.Errorln("fast response Body:", string(body))
+}
+
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	podInfo := sched.NextPod()
@@ -79,8 +132,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	if fastStatus == internalqueue.FastPod {
 		klog.Errorln("schecule fast pod", podInfo.Pod.Name)
 	} else {
-		klog.Errorln("skip scheculing fast hit pod", podInfo.Pod.Name)
-		return
+		klog.Errorln("schedule fast hit pod", podInfo.Pod.Name)
 	}
 
 	// pod could be nil when schedulerQueue is closed
@@ -111,7 +163,33 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 
 	schedulingCycleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	scheduleResult, err := sched.SchedulePod(schedulingCycleCtx, fwk, state, pod)
+
+	scheduleResult := ScheduleResult{
+		SuggestedHost:  "",
+		EvaluatedNodes: 0,
+		FeasibleNodes:  minFeasibleNodesToFind,
+	}
+	err = nil
+	if fastStatus == internalqueue.NormalPod {
+		scheduleResult, err = sched.SchedulePod(schedulingCycleCtx, fwk, state, pod)
+	} else if fastStatus == internalqueue.FastPod {
+		scheduleResult, err = sched.SchedulePod(schedulingCycleCtx, fwk, state, pod)
+		fastPod.SuggestedHost = scheduleResult.SuggestedHost
+		fastPod.FeasibleNodes = scheduleResult.FeasibleNodes
+		fastPod.EvaluatedNodes = scheduleResult.EvaluatedNodes
+		fastPod.ScheduleError = err
+		klog.Errorf("fast pod %s is scheduled to %s", pod.Name, scheduleResult.SuggestedHost)
+		go sendFastPodToNode(pod, fastPod.SuggestedHost)
+	} else if fastStatus == internalqueue.FastHitPod {
+		scheduleResult = ScheduleResult{
+			SuggestedHost:  fastPod.SuggestedHost,
+			EvaluatedNodes: fastPod.EvaluatedNodes,
+			FeasibleNodes:  fastPod.FeasibleNodes,
+		}
+		err = fastPod.ScheduleError
+		klog.Errorf("skip scheduling fast pod %s, previously scheduled to %s", pod.Name, scheduleResult.SuggestedHost)
+	}
+
 	if err != nil {
 		// SchedulePod() may have failed because the pod would not fit on any host, so we try to
 		// preempt, with the expectation that the next time the pod is tried for scheduling it
@@ -171,35 +249,39 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	}
 
 	// Run the Reserve method of reserve plugins.
-	if sts := fwk.RunReservePluginsReserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost); !sts.IsSuccess() {
-		metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
-		// trigger un-reserve to clean up state associated with the reserved Pod
-		fwk.RunReservePluginsUnreserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
-		if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
-			klog.ErrorS(forgetErr, "Scheduler cache ForgetPod failed")
+	if fastStatus == internalqueue.NormalPod {
+		if sts := fwk.RunReservePluginsReserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost); !sts.IsSuccess() {
+			metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
+			// trigger un-reserve to clean up state associated with the reserved Pod
+			fwk.RunReservePluginsUnreserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
+			if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
+				klog.ErrorS(forgetErr, "Scheduler cache ForgetPod failed")
+			}
+			sched.FailureHandler(ctx, fwk, assumedPodInfo, sts.AsError(), SchedulerError, clearNominatedNode)
+			return
 		}
-		sched.FailureHandler(ctx, fwk, assumedPodInfo, sts.AsError(), SchedulerError, clearNominatedNode)
-		return
 	}
 
 	// Run "permit" plugins.
-	runPermitStatus := fwk.RunPermitPlugins(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
-	if !runPermitStatus.IsWait() && !runPermitStatus.IsSuccess() {
-		var reason string
-		if runPermitStatus.IsUnschedulable() {
-			metrics.PodUnschedulable(fwk.ProfileName(), metrics.SinceInSeconds(start))
-			reason = v1.PodReasonUnschedulable
-		} else {
-			metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
-			reason = SchedulerError
+	if fastStatus == internalqueue.NormalPod {
+		runPermitStatus := fwk.RunPermitPlugins(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
+		if !runPermitStatus.IsWait() && !runPermitStatus.IsSuccess() {
+			var reason string
+			if runPermitStatus.IsUnschedulable() {
+				metrics.PodUnschedulable(fwk.ProfileName(), metrics.SinceInSeconds(start))
+				reason = v1.PodReasonUnschedulable
+			} else {
+				metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
+				reason = SchedulerError
+			}
+			// One of the plugins returned status different than success or wait.
+			fwk.RunReservePluginsUnreserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
+			if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
+				klog.ErrorS(forgetErr, "Scheduler cache ForgetPod failed")
+			}
+			sched.FailureHandler(ctx, fwk, assumedPodInfo, runPermitStatus.AsError(), reason, clearNominatedNode)
+			return
 		}
-		// One of the plugins returned status different than success or wait.
-		fwk.RunReservePluginsUnreserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
-		if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
-			klog.ErrorS(forgetErr, "Scheduler cache ForgetPod failed")
-		}
-		sched.FailureHandler(ctx, fwk, assumedPodInfo, runPermitStatus.AsError(), reason, clearNominatedNode)
-		return
 	}
 
 	// At the end of a successful scheduling cycle, pop and move up Pods if needed.
@@ -249,21 +331,23 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		}
 
 		// Run "prebind" plugins.
-		preBindStatus := fwk.RunPreBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
-		if !preBindStatus.IsSuccess() {
-			metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
-			// trigger un-reserve plugins to clean up state associated with the reserved Pod
-			fwk.RunReservePluginsUnreserve(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
-			if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
-				klog.ErrorS(forgetErr, "scheduler cache ForgetPod failed")
-			} else {
-				// "Forget"ing an assumed Pod in binding cycle should be treated as a PodDelete event,
-				// as the assumed Pod had occupied a certain amount of resources in scheduler cache.
-				// TODO(#103853): de-duplicate the logic.
-				sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(internalqueue.AssignedPodDelete, nil)
+		if fastStatus == internalqueue.NormalPod {
+			preBindStatus := fwk.RunPreBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
+			if !preBindStatus.IsSuccess() {
+				metrics.PodScheduleError(fwk.ProfileName(), metrics.SinceInSeconds(start))
+				// trigger un-reserve plugins to clean up state associated with the reserved Pod
+				fwk.RunReservePluginsUnreserve(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
+				if forgetErr := sched.Cache.ForgetPod(assumedPod); forgetErr != nil {
+					klog.ErrorS(forgetErr, "scheduler cache ForgetPod failed")
+				} else {
+					// "Forget"ing an assumed Pod in binding cycle should be treated as a PodDelete event,
+					// as the assumed Pod had occupied a certain amount of resources in scheduler cache.
+					// TODO(#103853): de-duplicate the logic.
+					sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(internalqueue.AssignedPodDelete, nil)
+				}
+				sched.FailureHandler(ctx, fwk, assumedPodInfo, preBindStatus.AsError(), SchedulerError, clearNominatedNode)
+				return
 			}
-			sched.FailureHandler(ctx, fwk, assumedPodInfo, preBindStatus.AsError(), SchedulerError, clearNominatedNode)
-			return
 		}
 
 		err := sched.bind(bindingCycleCtx, fwk, assumedPod, scheduleResult.SuggestedHost, state)
@@ -283,7 +367,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			return
 		}
 		// Calculating nodeResourceString can be heavy. Avoid it if klog verbosity is below 2.
-		klog.V(2).InfoS("Successfully bound pod to node", "pod", klog.KObj(pod), "node", scheduleResult.SuggestedHost, "evaluatedNodes", scheduleResult.EvaluatedNodes, "feasibleNodes", scheduleResult.FeasibleNodes)
+		klog.Errorln("Successfully bound pod to node", "pod", klog.KObj(pod), "node", scheduleResult.SuggestedHost, "evaluatedNodes", scheduleResult.EvaluatedNodes, "feasibleNodes", scheduleResult.FeasibleNodes)
 		metrics.PodScheduled(fwk.ProfileName(), metrics.SinceInSeconds(start))
 		metrics.PodSchedulingAttempts.Observe(float64(podInfo.Attempts))
 		metrics.PodSchedulingDuration.WithLabelValues(getAttemptsLabel(podInfo)).Observe(metrics.SinceInSeconds(podInfo.InitialAttemptTimestamp))
