@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go/http3"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -121,21 +123,31 @@ func (c *tlsTransportCache) get(config *Config) (http.RoundTripper, error) {
 		proxy = config.Proxy
 	}
 
-	transport := utilnet.SetTransportDefaults(&http.Transport{
-		Proxy:               proxy,
-		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:     tlsConfig,
-		MaxIdleConnsPerHost: idleConnsPerHost,
-		DialContext:         dial,
-		DisableCompression:  config.DisableCompression,
-	})
+	if os.Getenv("TRANSPORT") == "HTTP3" {
+		fmt.Println("I am using http3")
+		transport := &http3.RoundTripper{
+			TLSClientConfig:    tlsConfig,
+			DisableCompression: config.DisableCompression,
+		}
 
-	if canCache {
-		// Cache a single transport for these options
-		c.transports[key] = transport
+		return transport, nil
+	} else {
+		transport := utilnet.SetTransportDefaults(&http.Transport{
+			Proxy:               proxy,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:     tlsConfig,
+			MaxIdleConnsPerHost: idleConnsPerHost,
+			DialContext:         dial,
+			DisableCompression:  config.DisableCompression,
+		})
+
+		if canCache {
+			// Cache a single transport for these options
+			c.transports[key] = transport
+		}
+
+		return transport, nil
 	}
-
-	return transport, nil
 }
 
 // tlsConfigKey returns a unique key for tls.Config objects returned from TLSConfigFor
