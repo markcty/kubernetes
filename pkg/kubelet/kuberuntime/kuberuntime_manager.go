@@ -658,9 +658,9 @@ func (m *kubeGenericRuntimeManager) computePodActions(pod *v1.Pod, podStatus *ku
 }
 
 const (
-	NormalPod  int = 1
-	FastPod    int = 2
-	FastHitPod int = 3
+	NormalPod  int = 1 // 正常的Pod
+	FastPod    int = 2 // 预启动Pod，由客户端直接发送给Kubelet
+	FastHitPod int = 3 // 真正的Pod，由kube-apiserver同步
 )
 
 type FastPodR struct {

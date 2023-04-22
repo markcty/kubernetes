@@ -294,7 +294,7 @@ func makePodSourceConfig(kubeCfg *kubeletconfiginternal.KubeletConfiguration, ku
 			}
 			s, _ := json.Marshal(pod)
 			klog.Errorf("new fast pod: %s", string(s))
-			updates <- kubetypes.PodUpdate{Pods: []*v1.Pod{&pod}, Op: kubetypes.ADD, Source: kubetypes.HTTPSource}
+			updates <- kubetypes.PodUpdate{Pods: []*v1.Pod{&pod}, Op: kubetypes.ADD, Source: kubetypes.FastSource}
 			fmt.Fprintf(w, "new fast pod %s\n", pod.Name)
 		}))
 	}()
