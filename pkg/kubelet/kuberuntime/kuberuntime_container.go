@@ -192,7 +192,7 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 				containerConfig: nil,
 			}
 		}
-		klog.Errorf("Starting to bring up pod %s, uid: %s, spec: %+#v, sandboxConfig: %+#v", pod.Name, pod.UID, spec, podSandboxConfig)
+		// klog.Errorf("Starting to bring up pod %s, uid: %s, spec: %+#v, sandboxConfig: %+#v", pod.Name, pod.UID, spec, podSandboxConfig)
 	}
 	///
 
@@ -213,8 +213,11 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		cid := fastContainers[pod.Name].containerId
 		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
 		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
-		klog.Errorf("pod %s(%s)'s container %s fast hit, skipping bring up", pod.Name, pod.UID, cid)
+		klog.Errorf("pod %s(%s) container %s fast hit, skipping bring up", pod.Name, pod.UID, cid)
 	} else {
+		if fastStatus == FastPod {
+			klog.Errorf("pod %s start bringing up container")
+		}
 		restartCount := 0
 		containerStatus := podStatus.FindContainerStatusByName(container.Name)
 		if containerStatus != nil {
