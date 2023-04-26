@@ -25,10 +25,50 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
+// func fast_apply(filePath string, stopCh chan int) {
+// 	fileContent, err := ioutil.ReadFile(filePath)
+// 	if err != nil {
+// 		klog.Fatalf("Error reading the YAML file: %v", err)
+// 	}
+
+// 	var pod v1.Pod
+// 	err = yaml.Unmarshal(fileContent, &pod)
+// 	if err != nil {
+// 		log.Fatalf("Error unmarshalling the YAML content: %v", err)
+// 	}
+
+// 	// var podConfig map[string]interface{}
+// 	// err = yaml.Unmarshal(fileContent, &podConfig)
+// 	// if err != nil {
+// 	// 	log.Fatalf("Error unmarshalling the YAML content: %v", err)
+// 	// }
+// 	// fmt.Println("pod name", podConfig["metadata"].(map[string]string)["name"])
+
+// 	// hack the pod
+// 	pod.ObjectMeta.Name = pod.Spec.Containers[0].Name
+// 	pod.ObjectMeta.Namespace = "default"
+// 	pod.ObjectMeta.UID = "3ab5b2e5-0e75-4171-8128-51af97297917"
+
+// 	json, err := json.Marshal(pod)
+// 	if err != nil {
+// 		klog.Fatalf("Error marshalling the config to JSON: %v", err)
+// 	}
+
+// 	fmt.Printf("JSON Data:\n%s\n", json)
+
+// 	stopCh <- 1
+// }
+
 func main() {
+	// stopCh := make(chan int)
+	// if len(os.Args) == 4 && os.Args[1] == "apply" && os.Args[2] == "-f" && strings.Contains(os.Args[3], "fast") {
+	// 	fast_apply(os.Args[3], stopCh)
+	// 	return
+	// }
 	command := cmd.NewDefaultKubectlCommand()
 	if err := cli.RunNoErrOutput(command); err != nil {
 		// Pretty-print the error and exit with an error.
 		util.CheckErr(err)
 	}
+	// <-stopCh
 }

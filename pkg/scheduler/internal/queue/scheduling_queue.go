@@ -315,7 +315,7 @@ func (p *PriorityQueue) Add(pod *v1.Pod) error {
 	defer p.lock.Unlock()
 
 	fastStatus := NormalPod
-	if strings.HasPrefix(pod.Name, "fast") {
+	if strings.HasPrefix(pod.Name, "fastS") {
 		if fastPod, ok := FastPods[pod.Name]; ok {
 			fastStatus = FastHitPod
 			fastPod.State = FastHitPod

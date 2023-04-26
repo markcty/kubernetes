@@ -131,7 +131,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	}
 	if fastStatus == internalqueue.FastPod {
 		klog.Errorln("schecule fast pod", podInfo.Pod.Name)
-	} else {
+	} else if fastStatus == internalqueue.FastHitPod {
 		klog.Errorln("schedule fast hit pod", podInfo.Pod.Name)
 	}
 

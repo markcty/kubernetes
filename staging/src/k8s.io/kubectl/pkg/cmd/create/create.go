@@ -17,9 +17,13 @@ limitations under the License.
 package create
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"net/url"
 	"runtime"
 	"strings"
@@ -32,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -230,6 +235,102 @@ func (o *CreateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []s
 	return nil
 }
 
+var NodeUrl = map[string]string{
+	"kind-worker":  "http://kind-worker:10253",
+	"kind-worker2": "http://kind-worker2:10253",
+}
+
+func fast_create(jsonData []byte, stopCh chan int) {
+	var pod map[string]interface{}
+	err := json.Unmarshal([]byte(jsonData), &pod)
+	if err != nil {
+		klog.Fatalf("Error unmarshalling the JSON data: %v", err)
+	}
+
+	if metadata, ok := pod["metadata"].(map[string]interface{}); ok {
+		metadata["uid"] = uuid.NewUUID()
+	}
+
+	if spec, ok := pod["spec"].(map[string]interface{}); ok {
+		spec["restartPolicy"] = "Always"
+		spec["terminationGracePeriodSeconds"] = 30
+		spec["nodeName"] = "kind-worker"
+
+		containers := spec["containers"].([]interface{})
+		for i := 0; i < len(containers); i++ {
+			container := containers[i].(map[string]interface{})
+			container["terminationMessagePath"] = "/dev/termination-log"
+			container["terminationMessagePolicy"] = "File"
+			container["imagePullPolicy"] = "IfNotPresent"
+		}
+
+		spec["tolerations"] = []map[string]interface{}{
+			{
+				"key":               "node.kubernetes.io/not-ready",
+				"operator":          "Exists",
+				"effect":            "NoExecute",
+				"tolerationSeconds": 300,
+			},
+			{
+				"key":               "node.kubernetes.io/unreachable",
+				"operator":          "Exists",
+				"effect":            "NoExecute",
+				"tolerationSeconds": 300,
+			},
+		}
+
+		spec["dnsPolicy"] = "ClusterFirst"
+		spec["serviceAccountName"] = "default"
+		spec["serviceAccount"] = "default"
+		spec["enableServiceLinks"] = true
+		spec["preemptionPolicy"] = "PreemptLowerPriority"
+	}
+
+	pod["status"] = make(map[string]interface{})
+
+	if status, ok := pod["status"].(map[string]interface{}); ok {
+		status["phase"] = "Pending"
+		condition := map[string]string{
+			"type":               "PodScheduled",
+			"status":             "True",
+			"lastTransitionTime": "2023-03-21T04:11:09Z",
+		}
+		status["conditions"] = []interface{}{condition}
+		status["qosClass"] = "BestEffort"
+	}
+
+	modifiedPod, err := json.Marshal(pod)
+	if err != nil {
+		klog.Fatalf("Error marshalling the modified data to JSON: %v", err)
+	}
+	fmt.Println("fast json:", string(modifiedPod))
+
+	for node, url := range NodeUrl {
+		go func(node string, url string) {
+			req, err := http.NewRequest("POST", url, bytes.NewBuffer(modifiedPod))
+			if err != nil {
+				log.Fatalf("Error creating the HTTP POST request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+
+			if err != nil {
+				log.Fatalf("Error sending the HTTP POST request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				log.Fatalf("Request failed with status code: %d", resp.StatusCode)
+			}
+
+			fmt.Println("fast to", node, "succeeded")
+			fmt.Println()
+			stopCh <- 1
+		}(node, url)
+	}
+}
+
 // RunCreate performs the creation
 func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	// raw only makes sense for a single file resource multiple objects aren't likely to do what you want.
@@ -271,10 +372,21 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	}
 
 	count := 0
+	stopCh := make(chan int)
 	err = r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
 		}
+
+		klog.Errorf("create pod")
+		if strings.Contains(info.ObjectName(), "fast") {
+			objectJson, err := json.Marshal(info.Object)
+			if err != nil {
+				klog.Fatalf("Error marshalling the modified data to JSON: %v", err)
+			}
+			go fast_create(objectJson, stopCh)
+		}
+
 		if err := util.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), info.Object, scheme.DefaultJSONEncoder()); err != nil {
 			return cmdutil.AddSourceToErr("creating", info.Source, err)
 		}
@@ -311,6 +423,8 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	if count == 0 {
 		return fmt.Errorf("no objects passed to create")
 	}
+	<-stopCh
+	<-stopCh
 	return nil
 }
 

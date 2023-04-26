@@ -194,7 +194,7 @@ func (m *manager) GetPodStatus(uid types.UID) (v1.PodStatus, bool) {
 		if strings.HasPrefix(pod.Name, "fast") {
 			if fastPod, ok := FastPods[pod.Name]; ok {
 				if pod.UID == fastPod.realUID {
-					klog.Errorf("status manager get fast pod status hit")
+					// klog.Errorf("status manager get fast pod status hit")
 					uid = fastPod.realUID
 					status, ok := m.podStatuses[uid]
 					return status.status, ok
@@ -599,7 +599,7 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 			}
 		}
 		// jsonStr, _ := json.Marshal(m.po dStatuses)
-		klog.Errorf("fast pod %s statuses updated:, %+#v", pod.Name, m.podStatuses)
+		// klog.Errorf("fast pod %s statuses updated:, %+#v", pod.Name, m.podStatuses)
 	}
 
 	select {

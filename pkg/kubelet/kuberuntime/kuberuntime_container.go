@@ -167,6 +167,7 @@ func calcRestartCountByLogDir(path string) (int, error) {
 type fastContainer struct {
 	containerId     string
 	containerConfig *runtimeapi.ContainerConfig
+	eventsRecorded  bool
 }
 
 var fastContainers = map[string]*fastContainer{}
@@ -190,6 +191,7 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 			fastContainers[pod.Name] = &fastContainer{
 				containerId:     "",
 				containerConfig: nil,
+				eventsRecorded:  false,
 			}
 		}
 		// klog.Errorf("Starting to bring up pod %s, uid: %s, spec: %+#v, sandboxConfig: %+#v", pod.Name, pod.UID, spec, podSandboxConfig)
@@ -205,18 +207,21 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		m.recordContainerEvent(pod, container, "", v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
 		return msg, err
 	}
-	klog.Errorf("successfully pull image %s", pod.Name)
+	klog.Errorf("successfully pull %s's image ", pod.Name)
 
 	// Step 2: create the container.
-	// For a new container, the RestartCount should be 0
+	// For a new container, the RestartCount should be PulledImage
 	if fastStatus == FastHitPod {
 		cid := fastContainers[pod.Name].containerId
-		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
-		m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
+		if !fastContainers[pod.Name].eventsRecorded {
+			m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
+			m.recordContainerEvent(pod, container, cid, v1.EventTypeNormal, events.StartedContainer, fmt.Sprintf("Started container %s", container.Name))
+			fastContainers[pod.Name].eventsRecorded = true
+		}
 		klog.Errorf("pod %s(%s) container %s fast hit, skipping bring up", pod.Name, pod.UID, cid)
 	} else {
 		if fastStatus == FastPod {
-			klog.Errorf("pod %s start bringing up container")
+			klog.Errorf("pod %s start bringing up container", pod.Name)
 		}
 		restartCount := 0
 		containerStatus := podStatus.FindContainerStatusByName(container.Name)
